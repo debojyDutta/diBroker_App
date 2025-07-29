@@ -37,6 +37,10 @@ app.get('/', (req, res) => {
   res.redirect(getLoginUrl());
 });
 
+app.post('/', (req, res) => {
+  res.redirect(getLoginUrl());
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
 });

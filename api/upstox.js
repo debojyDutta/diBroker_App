@@ -56,6 +56,7 @@ const upstoxGet = async (endpoint) => {
     const response = await axios.get(url, {
       headers: {
         Authorization: `Bearer ${accessToken}`,
+        timeout: 10000,
       },
     });
 
@@ -67,5 +68,6 @@ const upstoxGet = async (endpoint) => {
 };
 module.exports = {
   upstoxGet,
-  getAccessToken
+  getAccessToken,
+  getStoredAccessToken
 };
