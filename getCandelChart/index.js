@@ -59,88 +59,94 @@ function getAllSaturdaysWithWeekNumbers(startDateStr, endDateStr) {
   return result;
 }
 
-async function calendarDataProcessor(symbol,startTime,endTime){
-  const encodedSymbol = encodeURIComponent(symbol)
-  let resultsData = getAllSaturdaysWithWeekNumbers(startTime,endTime)
-  for(let week of Object.keys(resultsData)){
-    let endpoint = ''
-    const today = resultsData[week].date
-    let interval = 5
-    let unit = 'minutes'
-    const todayDay = today.getDay(); // Sunday = 0, Saturday = 6
-    const daysSinceMonday = todayDay; // Backtrack to previous Monday
-    let startTime = new Date(today);
-    startTime.setDate(today.getDate() - daysSinceMonday);
-    let endTime = new Date(startTime);
-    endTime.setDate(startTime.getDate() + 5); // Friday of the same week
-    startTime  = formatDate(startTime)
-    endTime  = formatDate(endTime)
-    endpoint = `/v3/historical-candle/${encodedSymbol}/${unit}/${interval}/${endTime}/${startTime}`;
-    let weeklyData = await upstoxGet(endpoint);
-    if(weeklyData?.data?.candles?.length>0){
-      let candle = weeklyData.data.candles
-      const formattedCandles = candle.map(([Timestamp, Open, High, Low, Close, Volume, OpenInterest]) => ({
-        Timestamp,
-        Open,
-        High,
-        Low,
-        Close,
-        Volume,
-        OpenInterest,
-        symbol,
+async function calendarDataProcessor(symbol, startTime, endTime) {
+  const encodedSymbol = encodeURIComponent(symbol);
+  let resultsData = getAllSaturdaysWithWeekNumbers(startTime, endTime);
+
+  const weekPromises = Object.keys(resultsData).map(async (week) => {
+    const today = resultsData[week].date;
+    const interval = 5;
+    const unit = 'minutes';
+
+    const start = new Date(today);
+    start.setDate(today.getDate() - today.getDay()); // Monday
+    const end = new Date(start);
+    end.setDate(start.getDate() + 5); // Friday
+
+    const formattedStart = formatDate(start);
+    const formattedEnd = formatDate(end);
+
+    const endpoint = `/v3/historical-candle/${encodedSymbol}/${unit}/${interval}/${formattedEnd}/${formattedStart}`;
+    const weeklyData = await upstoxGet(endpoint);
+
+    if (weeklyData?.data?.candles?.length > 0) {
+      const formattedCandles = weeklyData.data.candles.map(([Timestamp, Open, High, Low, Close, Volume, OpenInterest]) => ({
+        Timestamp, Open, High, Low, Close, Volume, OpenInterest, symbol,
       }));
-      resultsData[week]= formattedCandles
+      return { week, data: formattedCandles };
     }
-    else{
-      delete resultsData[week]
-    }      
-    delete(resultsData[week].date)
-  }
-  return resultsData
-}
-async function calendarDataProcessorOptions(symbol,startTime,endTime,finalData){
-  let resultsData = getAllSaturdaysWithWeekNumbers(startTime,endTime)
-  for(let week of Object.keys(resultsData)){
-    let endpoint = ''
-    const today = resultsData[week].date
-    let interval = 5
-    let unit = 'minute'
-    const todayDay = today.getDay(); // Sunday = 0, Saturday = 6
-    const daysSinceMonday = todayDay; // Backtrack to previous Monday
-    let startTime = new Date(today);
-    startTime.setDate(today.getDate() - daysSinceMonday);
-    let endTime = new Date(startTime);
-    endTime.setDate(startTime.getDate() + 5); // Friday of the same week
-    startTime  = formatDate(startTime)
-    endTime  = formatDate(endTime)
-    if(startTime>endTime){
-      return finalData
-    }
-    endpoint = `/v2/expired-instruments/historical-candle/${symbol}/${interval}${unit}/${endTime}/${startTime}`;
-    let weeklyData = await upstoxGet(endpoint);
-    await delay(500);
-    if(weeklyData?.data?.candles?.length>0){
-      let candle = weeklyData.data.candles
-      const formattedCandles = candle.map(([Timestamp, Open, High, Low, Close, Volume, OpenInterest]) => ({
-        Timestamp,
-        Open,
-        High,
-        Low,
-        Close,
-        Volume,
-        OpenInterest,
-        symbol,
-      }));
-      if(Object.keys(finalData).includes(week)){
-        finalData[week].push(formattedCandles)
-      }
-      else{
-        finalData[week] = formattedCandles
-      }
+    return null; // Skip weeks with no data
+  });
+
+  const weeklyResults = await Promise.all(weekPromises);
+
+  const finalResults = {};
+  for (const result of weeklyResults) {
+    if (result) {
+      finalResults[result.week] = result.data;
     }
   }
-  return finalData
+
+  return finalResults;
 }
+
+async function calendarDataProcessorOptions(symbol, startTime, endTime, finalData) {
+  const resultsData = getAllSaturdaysWithWeekNumbers(startTime, endTime);
+
+  const weekPromises = Object.keys(resultsData).map(async (week) => {
+    const today = resultsData[week].date;
+    const interval = 5;
+    const unit = 'minute';
+
+    const start = new Date(today);
+    start.setDate(today.getDate() - today.getDay()); // Monday
+    const end = new Date(start);
+    end.setDate(start.getDate() + 5); // Friday
+
+    const formattedStart = formatDate(start);
+    const formattedEnd = formatDate(end);
+
+    if (formattedStart > formattedEnd) return null;
+
+    const endpoint = `/v2/expired-instruments/historical-candle/${symbol}/${interval}${unit}/${formattedEnd}/${formattedStart}`;
+    const weeklyData = await upstoxGet(endpoint);
+
+    await delay(300); // optional, if API throttles
+
+    if (weeklyData?.data?.candles?.length > 0) {
+      const formattedCandles = weeklyData.data.candles.map(([Timestamp, Open, High, Low, Close, Volume, OpenInterest]) => ({
+        Timestamp, Open, High, Low, Close, Volume, OpenInterest, symbol,
+      }));
+      return { week, data: formattedCandles };
+    }
+    return null;
+  });
+
+  const weeklyResults = await Promise.all(weekPromises);
+
+  for (const result of weeklyResults) {
+    if (result) {
+      if (Object.keys(finalData).includes(result.week)) {
+        finalData[result.week].push(...result.data);
+      } else {
+        finalData[result.week] = result.data;
+      }
+    }
+  }
+
+  return finalData;
+}
+
 
 function formatDate(date) {
   const year = date.getFullYear();
