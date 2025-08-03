@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { upstoxGet } = require('../api/upstox');
 const { getOptionsData } = require('../utils/getOptionsData');
+const { writeMergedObjToCSV } = require('../utils/writeMergedObjToCSV');
 
 function getLastLastSaturday(date = new Date()) {
   const day = date.getDay(); // 0=Sun, 6=Sat
@@ -78,10 +79,12 @@ async function calendarDataProcessor(symbol, startTime, endTime) {
 
     const endpoint = `/v3/historical-candle/${encodedSymbol}/${unit}/${interval}/${formattedEnd}/${formattedStart}`;
     const weeklyData = await upstoxGet(endpoint);
-
+    
+    let strike_price = 0
+    let instrument_type = 'Index'
     if (weeklyData?.data?.candles?.length > 0) {
       const formattedCandles = weeklyData.data.candles.map(([Timestamp, Open, High, Low, Close, Volume, OpenInterest]) => ({
-        Timestamp, Open, High, Low, Close, Volume, OpenInterest, symbol,
+        Timestamp, Open, High, Low, Close, Volume, OpenInterest, symbol,strike_price,instrument_type
       }));
       return { week, data: formattedCandles };
     }
@@ -100,7 +103,7 @@ async function calendarDataProcessor(symbol, startTime, endTime) {
   return finalResults;
 }
 
-async function calendarDataProcessorOptions(symbol, startTime, endTime, finalData) {
+async function calendarDataProcessorOptions(symbol, startTime, endTime,strike_price,instrument_type, finalData) {
   const resultsData = getAllSaturdaysWithWeekNumbers(startTime, endTime);
 
   const weekPromises = Object.keys(resultsData).map(async (week) => {
@@ -122,10 +125,9 @@ async function calendarDataProcessorOptions(symbol, startTime, endTime, finalDat
     const weeklyData = await upstoxGet(endpoint);
 
     await delay(300); // optional, if API throttles
-
     if (weeklyData?.data?.candles?.length > 0) {
       const formattedCandles = weeklyData.data.candles.map(([Timestamp, Open, High, Low, Close, Volume, OpenInterest]) => ({
-        Timestamp, Open, High, Low, Close, Volume, OpenInterest, symbol,
+        Timestamp, Open, High, Low, Close, Volume, OpenInterest, symbol,strike_price,instrument_type
       }));
       return { week, data: formattedCandles };
     }
@@ -177,15 +179,22 @@ router.post('/', async (req, res) => {
       if(element.instrument_key.trim().length>0){
         let expInstKey = element.instrument_key
         if(!Object.keys(optionIds).includes(expInstKey)){
-          optionIds[expInstKey]=element?.expiry
+          optionIds[expInstKey]={
+            'expiry': element?.expiry,
+            'strike_price':element?.strike_price,
+            'instrument_type':element?.instrument_type
+          }
         }
       }
     });
     for (const row of Object.keys(optionIds)) {
-      const expiry = optionIds[row]
-      mergedObj = await calendarDataProcessorOptions(row,startTime,expiry,mergedObj)
+      const expiry = optionIds[row]?.expiry
+      const strike_price = optionIds[row]?.strike_price
+      const instrument_type = optionIds[row]?.instrument_type
+      mergedObj = await calendarDataProcessorOptions(row,startTime,expiry,strike_price,instrument_type,mergedObj)
     }
-    res.json({ status: 'success', mergedObj });
+    const csvPath = writeMergedObjToCSV(mergedObj);
+    res.json({ status: 'success', csvPath, mergedObj });
   } catch (err) {
     console.error('Error fetching candle data:', err.message);
     res.status(500).json({ status: 'error', message: err.message });
