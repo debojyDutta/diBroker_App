@@ -3,6 +3,25 @@ const router = express.Router();
 const { upstoxGet } = require('../api/upstox');
 const { getOptionsData } = require('../utils/getOptionsData');
 const { writeMergedObjToCSV } = require('../utils/writeMergedObjToCSV');
+const fs = require('fs');
+const csv = require('csv-parser');
+
+function getColumn(filePath, columnName) {
+  return new Promise((resolve, reject) => {
+    const results = [];
+    fs.createReadStream(filePath)
+      .pipe(csv())
+      .on('data', (row) => {
+        if (row[columnName]) {
+          results.push(row[columnName]);
+        }
+      })
+      .on('end', () => {
+        resolve(results);  // return list
+      })
+      .on('error', reject);
+  });
+}
 
 function getLastLastSaturday(date = new Date()) {
   const day = date.getDay(); // 0=Sun, 6=Sat
@@ -60,7 +79,17 @@ function getAllSaturdaysWithWeekNumbers(startDateStr, endDateStr) {
   return result;
 }
 
-async function calendarDataProcessor(symbol, startTime, endTime) {
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// simple rate limiter: ensures max 50 requests/sec (~20ms gap)
+async function rateLimitedRequest(fn) {
+  await sleep(20); 
+  return fn();
+}
+
+async function calendarDataProcessor(symbol, startTime, endTime, instrument_type = 'Index') { 
   const encodedSymbol = encodeURIComponent(symbol);
   let resultsData = getAllSaturdaysWithWeekNumbers(startTime, endTime);
 
@@ -78,13 +107,14 @@ async function calendarDataProcessor(symbol, startTime, endTime) {
     const formattedEnd = formatDate(end);
 
     const endpoint = `/v3/historical-candle/${encodedSymbol}/${unit}/${interval}/${formattedEnd}/${formattedStart}`;
-    const weeklyData = await upstoxGet(endpoint);
+
+    // enforce rate limit here
+    const weeklyData = await rateLimitedRequest(() => upstoxGet(endpoint));
     
-    let strike_price = 0
-    let instrument_type = 'Index'
+    let strike_price = 0;
     if (weeklyData?.data?.candles?.length > 0) {
       const formattedCandles = weeklyData.data.candles.map(([Timestamp, Open, High, Low, Close, Volume, OpenInterest]) => ({
-        Timestamp, Open, High, Low, Close, Volume, OpenInterest, symbol,strike_price,instrument_type
+        Timestamp, Open, High, Low, Close, Volume, OpenInterest, symbol, strike_price, instrument_type
       }));
       return { week, data: formattedCandles };
     }
@@ -103,7 +133,7 @@ async function calendarDataProcessor(symbol, startTime, endTime) {
   return finalResults;
 }
 
-async function calendarDataProcessorOptions(symbol, startTime, endTime,strike_price,instrument_type, finalData) {
+async function calendarDataProcessorOptions(symbol, startTime, endTime, strike_price, instrument_type, finalData) {
   const resultsData = getAllSaturdaysWithWeekNumbers(startTime, endTime);
 
   const weekPromises = Object.keys(resultsData).map(async (week) => {
@@ -127,7 +157,7 @@ async function calendarDataProcessorOptions(symbol, startTime, endTime,strike_pr
     await delay(300); // optional, if API throttles
     if (weeklyData?.data?.candles?.length > 0) {
       const formattedCandles = weeklyData.data.candles.map(([Timestamp, Open, High, Low, Close, Volume, OpenInterest]) => ({
-        Timestamp, Open, High, Low, Close, Volume, OpenInterest, symbol,strike_price,instrument_type
+        Timestamp, Open, High, Low, Close, Volume, OpenInterest, symbol, strike_price, instrument_type
       }));
       return { week, data: formattedCandles };
     }
@@ -135,7 +165,7 @@ async function calendarDataProcessorOptions(symbol, startTime, endTime,strike_pr
   });
 
   const weeklyResults = await Promise.all(weekPromises);
-
+  await delay(70); // optional, if API throttles
   for (const result of weeklyResults) {
     if (result) {
       if (Object.keys(finalData).includes(result.week)) {
@@ -148,6 +178,7 @@ async function calendarDataProcessorOptions(symbol, startTime, endTime,strike_pr
 
   return finalData;
 }
+
 
 
 function formatDate(date) {
@@ -173,6 +204,36 @@ router.post('/', async (req, res) => {
     endTime = (parseYYYYMMDD(endTime) < maxEndDate) ? endTime : formatDate(maxEndDate);
     let finalData = await calendarDataProcessor(symbol,startTime,endTime)
     Object.assign(mergedObj,finalData)
+    if(symbol == "NSE_INDEX|Nifty 50"){
+      const symbols = await getColumn('.\\ind_nifty50list.csv', 'ISIN Code');
+      for(let symbolConstituent of symbols){
+        let nwSymbol = `NSE_EQ|${symbolConstituent}`
+        let constituentData = await calendarDataProcessor(nwSymbol,startTime,endTime,'N50_CONS')
+        for (const week of Object.keys(constituentData)) {
+          if (week) {
+            if (Object.keys(mergedObj).includes(week)) {
+              mergedObj[week].push(...constituentData[week]);
+            } else {
+              mergedObj[week] = constituentData[week];
+            }
+          }
+        }
+      }
+      const symbolsIdx = await getColumn('.\\exteraIndices.csv', 'Symbol');
+      for(let symbolConstituent of symbolsIdx){
+        let nwSymbol = `NSE_INDEX|${symbolConstituent}`
+        let constituentData = await calendarDataProcessor(nwSymbol,startTime,endTime,'EXT')
+        for (const week of Object.keys(constituentData)) {
+          if (week) {
+            if (Object.keys(mergedObj).includes(week)) {
+              mergedObj[week].push(...constituentData[week]);
+            } else {
+              mergedObj[week] = constituentData[week];
+            }
+          }
+        }
+      }
+    }
     const options = await getOptionsData(startTime,endTime,symbol)
     let optionIds ={}
     options.forEach(element => {
@@ -194,7 +255,7 @@ router.post('/', async (req, res) => {
       mergedObj = await calendarDataProcessorOptions(row,startTime,expiry,strike_price,instrument_type,mergedObj)
     }
     const csvPath = writeMergedObjToCSV(mergedObj);
-    res.json({ status: 'success', csvPath, mergedObj });
+    res.json({ status: 'success', csvPath });
   } catch (err) {
     console.error('Error fetching candle data:', err.message);
     res.status(500).json({ status: 'error', message: err.message });
